@@ -1,13 +1,23 @@
 from flask import Flask, jsonify, request, send_file, make_response, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_httpauth import HTTPBasicAuth
+from cachetools import TTLCache
 import os
 import json
 import sqlite3
 import datetime
 
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'super-secret-key'
+app.config['SECRET_KEY'] = os.environ.get('SERVER_SECRET_KEY', 'super-secret-key')
+db_host = os.environ.get('DB_HOST', 'localhost')
+db_name = os.environ.get('DB_NAME', 'mydatabase')
+db_user = os.environ.get('DB_USER', 'myuser')
+db_password = os.environ.get('DB_PASSWORD', 'mypassword')
+db_connection_string = f"postgresql://{db_user}:{db_password}@{db_host}/{db_name}"
+
+# Define a cache with a 1-minute TTL
+gltf_cache = TTLCache(maxsize=100, ttl=60)
 
 # Define a list of authorized users (username, password hash, and roles)
 authorized_users = [
@@ -43,23 +53,33 @@ def is_authorized(username, permission):
 # This endpoint allows a user to register for the system
 @app.route('/register', methods=['POST'])
 def register_user():
-    data = request.get_json()
-    username = data['username']
-    password = data['password']
-    for user in authorized_users:
-        if user['username'] == username:
-            abort(400, description='Username already exists')
-    password_hash = generate_password_hash(password)
-    registered_users.append({'username': username, 'password_hash': password_hash})
-    authorized_users.append({'username': username, 'password_hash': password_hash, 'roles': ['user']})
-    return make_response(jsonify({'message': 'User registered successfully'}), 201)
+    try:
+        data = request.get_json()
+        username = data['username']
+        password = data['password']
+        for user in authorized_users:
+            if user['username'] == username:
+                abort(400, description='Username already exists')
+        password_hash = generate_password_hash(password)
+        registered_users.append({'username': username, 'password_hash': password_hash})
+        authorized_users.append({'username': username, 'password_hash': password_hash, 'roles': ['user']})
+        return make_response(jsonify({'message': 'User registered successfully'}), 201)
+    except Exception as e:
+        app.logger.error(f"Error registering user: {str(e)}")
+        abort(500, description="Internal Server Error")
+
 
 # This endpoint returns a list of all available GLTF files
 @app.route('/gltf', methods=['GET'])
 @auth.login_required
 def get_gltf_list():
-    gltf_dir = 'gltf/'
-    gltf_files = [f for f in os.listdir(gltf_dir) if os.path.isfile(os.path.join(gltf_dir, f))]
+    # Check the cache for the file list
+    gltf_files = gltf_cache.get('gltf_files')
+    if gltf_files is None:
+        # If the file list is not in the cache, read it from disk and add it to the cache
+        gltf_dir = 'gltf/'
+        gltf_files = [f for f in os.listdir(gltf_dir) if os.path.isfile(os.path.join(gltf_dir, f))]
+        gltf_cache['gltf_files'] = gltf_files
     return jsonify(gltf_files)
 
 # This endpoint returns a specified GLTF file in a JSON response
